@@ -1,0 +1,20 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/debian
+{
+	"name": "Hermes Agent",
+	// Build from the project root Dockerfile so the devcontainer environment
+	// matches production: Python 3.13 (uv), Node 22, system deps, etc.
+	"build": {
+		"dockerfile": "../Dockerfile",
+		"context": ".."
+	},
+
+	// Use 'forwardPorts' to make a list of ports inside the container available locally.
+	// "forwardPorts": [],
+
+	// Configure tool-specific properties.
+	// "customizations": {},
+
+	// The Dockerfile creates a non-root 'hermes' user (UID 10000).
+	"remoteUser": "hermes"
+}
