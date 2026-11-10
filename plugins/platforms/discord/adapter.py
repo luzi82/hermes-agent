@@ -316,9 +316,40 @@ from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
 from tools.url_safety import is_safe_url
 from gateway.platforms._shared import (
     decode_json_list_literal as _decode_json_list_literal, env_is_connected as _env_is_connected,
-    extra_or_secret as _extra_or_secret, platform_gate_env as _scoped_gate_env, send_error,
-    yaml_env_setter as _yaml_env_setter
+    extra_or_secret as _extra_or_secret, get_scoped_secret, platform_gate_env as _scoped_gate_env,
+    send_error, yaml_env_setter as _yaml_env_setter
 )
+
+# Hosts discord.py 2.7.1 dials for REST, the gateway websocket, and CDN media.
+# ``NO_PROXY`` apex / dot / wildcard entries match these through the shared
+# suffix rules (``discord.gg`` matches ``gateway.discord.gg``).
+_DISCORD_PROXY_HOSTS = (
+    "discord.com",
+    "gateway.discord.gg",
+    "cdn.discordapp.com",
+    "media.discordapp.net",
+)
+
+
+def resolve_discord_proxy_url(
+    target_hosts: str | list[str] | tuple[str, ...] | set[str] | None = None,
+) -> str | None:
+    """Proxy for one Discord dial.
+
+    A set ``DISCORD_PROXY`` is intentional and is used as-is: it overrides
+    ``HTTPS_PROXY`` / ``HTTP_PROXY`` / ``ALL_PROXY`` and is not cancelled by
+    ``NO_PROXY``. When it is empty, that generic proxy is used unless
+    ``NO_PROXY`` / ``no_proxy`` excludes a host this call will dial — Discord
+    REST, Gateway, and CDN by default, or ``target_hosts`` for some other URL.
+    """
+    from gateway.platforms.base import resolve_proxy_url
+    from utils import normalize_proxy_url
+
+    explicit = normalize_proxy_url(get_scoped_secret("DISCORD_PROXY", "") or "")
+    if explicit:
+        return explicit
+    hosts = _DISCORD_PROXY_HOSTS if target_hosts is None else target_hosts
+    return resolve_proxy_url(target_hosts=hosts)
 
 
 def _unauthorized() -> str:
@@ -1379,8 +1410,8 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
             return
         except Exception as err:  # pragma: no cover - defensive
             exc = err
-        from gateway.platforms.base import describe_proxy_error, resolve_proxy_url as _proxy
-        shown = describe_proxy_error(exc, _proxy("DISCORD_PROXY")) if exc else None  # raw text may echo a proxy secret
+        from gateway.platforms.base import describe_proxy_error
+        shown = describe_proxy_error(exc, resolve_discord_proxy_url()) if exc else None  # raw text may echo a proxy secret
         message = f"Discord gateway task exited: {shown or exc}" if exc else "Discord gateway task exited without an exception"
         logger.error("[%s] %s", self.name, message, exc_info=exc if exc and not shown else False)
         self._set_fatal_error("discord_gateway_task_exited", message, retryable=True)
@@ -1426,9 +1457,10 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
                 self._allowed_user_ids, self._allowed_role_ids,
             )
             intents.voice_states = True
-            # Resolve proxy (DISCORD_PROXY > generic env vars > macOS system proxy)
-            from gateway.platforms.base import proxy_kwargs_for_bot, resolve_proxy_url, safe_proxy_url_for_log
-            proxy_url = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
+            # DISCORD_PROXY wins when set. Otherwise HTTPS_PROXY / HTTP_PROXY / ALL_PROXY,
+            # unless NO_PROXY / no_proxy excludes a Discord REST, Gateway, or CDN host.
+            from gateway.platforms.base import proxy_kwargs_for_bot, safe_proxy_url_for_log
+            proxy_url = resolve_discord_proxy_url()
             if proxy_url:
                 logger.info("[%s] Using proxy for Discord: %s", self.name, safe_proxy_url_for_log(proxy_url))
             # proxy= for HTTP, connector= for SOCKS; allowed_mentions per _build_allowed_mentions.
@@ -1579,8 +1611,8 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
             )
             return False
         except Exception as e:  # pragma: no cover - defensive logging
-            from gateway.platforms.base import describe_proxy_error, resolve_proxy_url as _proxy
-            proxy_error = describe_proxy_error(e, _proxy(platform_env_var="DISCORD_PROXY"))
+            from gateway.platforms.base import describe_proxy_error
+            proxy_error = describe_proxy_error(e, resolve_discord_proxy_url())
             logger.error("[%s] Failed to connect to Discord: %s", self.name, proxy_error or e, exc_info=not proxy_error)
             # Same zombie-client hazard: client.start() may already run when a later step raises.
             await self._cancel_bot_task()
@@ -5946,8 +5978,8 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
         if not is_safe_url(att.url):
             raise ValueError(f"Blocked unsafe attachment URL (SSRF protection): {att.url}")
         import aiohttp
-        from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
-        _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
+        from gateway.platforms.base import proxy_kwargs_for_aiohttp
+        _proxy = resolve_discord_proxy_url(target_hosts=att.url)
         _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
         async with aiohttp.ClientSession(**_sess_kw) as session:
             async with session.get(
@@ -7024,8 +7056,8 @@ async def _standalone_send(
         token = (get_secret("DISCORD_BOT_TOKEN", "") or "").strip()
     if not token:
         return send_error("Discord standalone send: DISCORD_BOT_TOKEN is not set")
-    from gateway.platforms.base import describe_proxy_error, resolve_proxy_url, proxy_kwargs_for_aiohttp
-    _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
+    from gateway.platforms.base import describe_proxy_error, proxy_kwargs_for_aiohttp
+    _proxy = resolve_discord_proxy_url()
     try:
         _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
         auth_headers = {"Authorization": f"Bot {token}"}

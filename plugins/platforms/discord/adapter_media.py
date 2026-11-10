@@ -237,8 +237,9 @@ class DiscordMediaMixin:
                         # Download to BytesIO so it renders inline
                         try:
                             import aiohttp as _aiohttp
-                            from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
-                            _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
+                            from gateway.platforms.base import proxy_kwargs_for_aiohttp
+                            from plugins.platforms.discord.adapter import resolve_discord_proxy_url
+                            _proxy = resolve_discord_proxy_url(target_hosts=image_url)
                             _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
                             if aiohttp_session is None:
                                 aiohttp_session = _aiohttp.ClientSession(**_sess_kw)
@@ -453,8 +454,9 @@ class DiscordMediaMixin:
             channel = await self._resolve_channel(_prompt_target_id(chat_id, metadata))
             if not channel:
                 return SendResult(success=False, error=f"Channel {chat_id} not found")
-            from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
-            _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(resolve_proxy_url(platform_env_var="DISCORD_PROXY"))
+            from gateway.platforms.base import proxy_kwargs_for_aiohttp
+            from plugins.platforms.discord.adapter import resolve_discord_proxy_url
+            _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(resolve_discord_proxy_url(target_hosts=url))
             async with aiohttp.ClientSession(**_sess_kw) as session:
                 status, data, headers = await _read_url_image_with_redirect_guard(
                     session, url, timeout=aiohttp.ClientTimeout(total=30), request_kwargs=_req_kw,
