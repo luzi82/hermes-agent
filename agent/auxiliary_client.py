@@ -6081,14 +6081,18 @@ def _resolve_task_provider_model(
 
 _DEFAULT_AUX_TIMEOUT = 30.0
 
-# Reasoning compression models can exceed the default 120 s config timeout, falling back to the
-# deterministic marker. Bounded *floor* for config-derived compression timeouts only; never
-# overrides an explicit per-call timeout.
-# Compression summarises large conversation histories; a reasoning auxiliary model (e.g. Codex / GPT-5.5)
-# can legitimately take longer than the default ``auxiliary.compression.timeout`` (120 s), causing the
-# stream to time out and the compressor to fall back to the deterministic context marker (#54915). A floor
-# is harmless for fast compression models (they finish before the deadline) and is a minimum, so a higher
-# config value is kept unchanged.
+# Built-in compression budget when ``auxiliary.compression.timeout`` /
+# ``no_progress_timeout`` are absent. A reasoning summary (Codex) can sit silent well past
+# the old 60s no-progress watchdog and the old 120s/300s request budget (#54915). These apply
+# only to the compression task. Other auxiliary tasks keep ``_DEFAULT_AUX_TIMEOUT`` and
+# ``_AUX_STREAM_NO_PROGRESS_TIMEOUT_SECONDS``.
+_COMPRESSION_BUILTIN_TIMEOUT_SECONDS = 900.0
+_COMPRESSION_BUILTIN_NO_PROGRESS_TIMEOUT_SECONDS = 900.0
+
+# Historical floor for a compression timeout that was never configured. The built-in is already
+# 900s, so this cannot lower that default. An explicit ``auxiliary.compression.timeout`` is not
+# raised to this floor (a shorter override is the operator's budget). Never applies to a per-call
+# ``timeout=`` argument, and never to other auxiliary tasks.
 _COMPRESSION_TIMEOUT_FLOOR_SECONDS = 300.0
 
 
@@ -6158,48 +6162,78 @@ def _compression_fast_lane_controls(
     return max_tokens, body
 
 
-def _get_task_no_progress_timeout(task: str) -> Optional[float]:
-    """``auxiliary.<task>.no_progress_timeout`` from config, or None when unset/invalid
-    (the Codex and chat-stream watchdogs then keep the built-in ``_AUX_STREAM_NO_PROGRESS_TIMEOUT_SECONDS``
-    default). Lets an operator widen the substantive-progress window independently of the
-    overall request timeout — see #108104."""
+def _builtin_no_progress_timeout(task: str) -> float:
+    """Substantive-progress window when a task does not set a positive ``no_progress_timeout``."""
+    if task == "compression":
+        return _COMPRESSION_BUILTIN_NO_PROGRESS_TIMEOUT_SECONDS
+    return _AUX_STREAM_NO_PROGRESS_TIMEOUT_SECONDS
+
+
+def _positive_config_number(task: str, key: str) -> Optional[float]:
+    """Positive ``auxiliary.<task>.<key>`` number, or None when absent / not a positive number."""
     if not task:
         return None
-    raw = _get_auxiliary_task_config(task).get("no_progress_timeout")
-    if raw is None:
+    raw = _get_auxiliary_task_config(task).get(key)
+    if raw is None or isinstance(raw, bool):
         return None
     try:
         value = float(raw)
-    except (ValueError, TypeError):
-        value = 0.0
-    if isinstance(raw, bool) or value <= 0:
-        # Fail clearly: a typo here silently leaving the 60s default is exactly the
-        # "why did my 600s request abort after 60s" confusion the key exists to remove.
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _get_task_no_progress_timeout(task: str) -> Optional[float]:
+    """``auxiliary.<task>.no_progress_timeout`` from config.
+
+    Compression with no positive value uses the 900s built-in. Other tasks return None so the
+    Codex and chat-stream watchdogs keep ``_AUX_STREAM_NO_PROGRESS_TIMEOUT_SECONDS`` (60s).
+    An explicit positive value is returned as written, including one shorter than the built-in.
+    See #108104."""
+    if not task:
+        return None
+    raw = _get_auxiliary_task_config(task).get("no_progress_timeout")
+    builtin = _builtin_no_progress_timeout(task)
+    if raw is None:
+        return builtin if task == "compression" else None
+    value = _positive_config_number(task, "no_progress_timeout")
+    if value is None:
+        # Fail clearly: a typo here silently leaving the short default is exactly the
+        # "why did my long request abort early" confusion the key exists to remove.
         logger.warning(
             "auxiliary.%s.no_progress_timeout=%r is not a positive number of seconds; "
-            "using the built-in %.0fs default", task, raw, _AUX_STREAM_NO_PROGRESS_TIMEOUT_SECONDS)
-        return None
+            "using the built-in %.0fs default", task, raw, builtin)
+        return builtin if task == "compression" else None
     return value
 
 
 def _get_task_timeout(task: str, default: float = _DEFAULT_AUX_TIMEOUT) -> float:
-    """``auxiliary.<task>.timeout`` from config, else *default*."""
+    """``auxiliary.<task>.timeout`` from config, else *default* (900s for compression)."""
     if not task:
         return default
-    raw = _get_auxiliary_task_config(task).get("timeout")
-    if raw is not None:
-        with contextlib.suppress(ValueError, TypeError):
-            return float(raw)
+    configured = _positive_config_number(task, "timeout")
+    if configured is not None:
+        return configured
+    if task == "compression":
+        return _COMPRESSION_BUILTIN_TIMEOUT_SECONDS
     return default
 
 
 def _effective_aux_timeout(task: str, timeout: Optional[float]) -> float:
-    """Explicit ``timeout`` wins, else config; compression gets a floor so a reasoning model
-    summarising a large context isn't cut off."""
+    """Per-call ``timeout`` wins. Otherwise the task config timeout.
+
+    Compression's built-in request budget is 900s. A positive ``auxiliary.compression.timeout``
+    is used as written — a shorter override is not raised to 900s or to the historical 300s
+    floor. That floor only backs a compression timeout that was never configured, and the
+    built-in is already above it. Other auxiliary tasks are not floored."""
     if timeout is not None:
         return timeout
-    effective = _get_task_timeout(task)
-    return max(effective, _COMPRESSION_TIMEOUT_FLOOR_SECONDS) if task == "compression" else effective
+    if task == "compression":
+        configured = _positive_config_number(task, "timeout")
+        if configured is None:
+            return max(_COMPRESSION_BUILTIN_TIMEOUT_SECONDS, _COMPRESSION_TIMEOUT_FLOOR_SECONDS)
+        return configured
+    return _get_task_timeout(task)
 
 
 def _with_custom_endpoint_extra_body(

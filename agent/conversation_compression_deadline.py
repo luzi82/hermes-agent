@@ -45,10 +45,12 @@ def resolve_context_compression_timeouts(compression_cfg: Optional[dict] = None)
                 ceiling = float(cfg["context_total_ceiling_seconds"])
     if idle > 0:
         ceiling = max(ceiling, idle)
-        # #114594: the aux summary attempt legitimately needs up to its own budget (floor 300s), while the
-        # host idle watchdog defaults to 120s. Clamp the idle window up to at least the effective aux
-        # compression timeout so prep/chunking work with no streamed tokens yet is not cut off. Only raises:
-        # an explicit cfg value above the aux budget is kept, and idle never exceeds the ceiling.
+        # #114594: the aux summary attempt legitimately needs up to its own budget (built-in 900s;
+        # an explicit auxiliary.compression.timeout is kept, including a shorter one), while the
+        # host idle watchdog's configured default is 120s. Clamp the idle window up to at least the
+        # effective aux compression timeout so prep/chunking work with no streamed tokens yet is not
+        # cut off. Only raises: an explicit cfg value above the aux budget is kept, and idle never
+        # exceeds the ceiling.
         from agent.auxiliary_client import _effective_aux_timeout
         _aux_budget = float(_effective_aux_timeout("compression", None))
         if _aux_budget > 0:

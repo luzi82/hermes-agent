@@ -1,24 +1,17 @@
-"""Regression tests for the compression-scoped auxiliary timeout floor (#54915).
+"""Compression's built-in auxiliary request budget is 900s (#54915 follow-up).
 
-Context compression summarises large conversation histories.  When the
-resolved auxiliary provider is a reasoning model (e.g. Codex / GPT-5.5) the
-summary can legitimately exceed the default ``auxiliary.compression.timeout``
-of 120 s, causing the stream to time out and the compressor to fall back to a
-deterministic context marker — silently losing the LLM summary.
+A reasoning summary can sit silent well past the old 120s config timeout and
+the 300s floor that used to raise it. The built-in budget is now 900s for
+compression only:
 
-The fix layers a *bounded* timeout floor on top of the config-derived
-compression timeout, while honouring the four constraints from the issue:
+  * Other auxiliary tasks keep their own timeouts.
+  * An explicit per-call ``timeout=`` is used as written.
+  * A positive ``auxiliary.compression.timeout`` is used as written, including
+    a value shorter than 900s and shorter than the historical 300s floor.
+  * Sync ``call_llm`` and async ``async_call_llm`` share ``_effective_aux_timeout``.
 
-  * Only the ``compression`` task gets the floor (other auxiliary tasks keep
-    their own timeouts).
-  * An explicit per-call ``timeout=`` override is **not** floored.
-  * The floor is a minimum — a config value already above it is unchanged.
-  * Both the sync (``call_llm``) and async (``async_call_llm``) paths are
-    covered.
-
-These tests exercise the real ``call_llm`` / ``async_call_llm`` production
-paths with a mocked LLM client and assert the timeout that actually reaches
-``client.chat.completions.create``.
+These tests exercise the real call paths with a mocked LLM client and assert
+the timeout that actually reaches ``client.chat.completions.create``.
 """
 
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -27,15 +20,11 @@ import pytest
 
 from agent.auxiliary_client import call_llm, async_call_llm
 
-# The committed bounded floor for config-derived compression timeouts.
-# Behaviour contract (see AGENTS.md "Behavior contracts over snapshots"):
-# compression's effective timeout must be at least this when it is
-# config-derived.
-COMPRESSION_TIMEOUT_FLOOR = 300.0
+# Built-in compression request budget when the profile does not set one.
+COMPRESSION_BUILTIN_TIMEOUT = 900.0
 
-# The default ``auxiliary.compression.timeout`` shipped in the config schema
-# (hermes_cli/config.py).  Simulated here as the config-derived value.
-COMPRESSION_CONFIG_TIMEOUT = 120.0
+# An explicit config value below the built-in and below the historical 300s floor.
+COMPRESSION_SHORT_OVERRIDE = 45.0
 
 
 def _ok_response():
@@ -72,26 +61,34 @@ def _patches(client, *, task_timeout):
 
 
 class TestCompressionTimeoutFloorSync:
-    """Sync ``call_llm`` applies the floor to config-derived compression timeouts."""
+    """Sync ``call_llm`` uses the 900s built-in unless config sets a timeout."""
 
-    def test_config_derived_compression_timeout_is_raised_to_floor(self):
-        """Layer 1: compression with a 120 s config timeout must reach the
-        client with at least the 300 s floor."""
+    def test_builtin_compression_timeout_reaches_the_client(self):
         client = _client_sync()
-        p1, p2, p3, p4 = _patches(client, task_timeout=COMPRESSION_CONFIG_TIMEOUT)
-        with p1, p2, p3, p4:
+        p1, p2, p3, p4 = _patches(client, task_timeout=30.0)
+        with p1, p2, p3, p4, patch(
+            "agent.auxiliary_client._get_auxiliary_task_config", return_value={},
+        ):
             call_llm(
                 task="compression",
                 messages=[{"role": "user", "content": "summarise this"}],
             )
         timeout = client.chat.completions.create.call_args.kwargs["timeout"]
-        assert timeout >= COMPRESSION_TIMEOUT_FLOOR, (
-            f"compression timeout {timeout} should be >= floor "
-            f"{COMPRESSION_TIMEOUT_FLOOR}"
-        )
-        assert timeout > COMPRESSION_CONFIG_TIMEOUT, (
-            "the too-low config timeout must not pass through unchanged"
-        )
+        assert timeout == COMPRESSION_BUILTIN_TIMEOUT
+
+    def test_explicit_shorter_config_timeout_is_not_raised(self):
+        client = _client_sync()
+        p1, p2, p3, p4 = _patches(client, task_timeout=COMPRESSION_SHORT_OVERRIDE)
+        with p1, p2, p3, p4, patch(
+            "agent.auxiliary_client._get_auxiliary_task_config",
+            return_value={"timeout": COMPRESSION_SHORT_OVERRIDE},
+        ):
+            call_llm(
+                task="compression",
+                messages=[{"role": "user", "content": "summarise this"}],
+            )
+        timeout = client.chat.completions.create.call_args.kwargs["timeout"]
+        assert timeout == COMPRESSION_SHORT_OVERRIDE
 
 
     def test_non_compression_task_is_not_floored(self):
@@ -116,25 +113,24 @@ class TestCompressionTimeoutFloorAsync:
     """Async ``async_call_llm`` mirrors the sync floor (Layer 2)."""
 
     @pytest.mark.asyncio
-    async def test_async_config_derived_compression_timeout_is_raised_to_floor(self):
+    async def test_async_builtin_compression_timeout_reaches_the_client(self):
         client = _client_async()
-        p1, p2, p3, p4 = _patches(client, task_timeout=COMPRESSION_CONFIG_TIMEOUT)
-        with p1, p2, p3, p4:
+        p1, p2, p3, p4 = _patches(client, task_timeout=30.0)
+        with p1, p2, p3, p4, patch(
+            "agent.auxiliary_client._get_auxiliary_task_config", return_value={},
+        ):
             await async_call_llm(
                 task="compression",
                 messages=[{"role": "user", "content": "summarise this"}],
             )
         timeout = client.chat.completions.create.call_args.kwargs["timeout"]
-        assert timeout >= COMPRESSION_TIMEOUT_FLOOR, (
-            f"async compression timeout {timeout} should be >= floor "
-            f"{COMPRESSION_TIMEOUT_FLOOR}"
-        )
+        assert timeout == COMPRESSION_BUILTIN_TIMEOUT
 
     @pytest.mark.asyncio
     async def test_async_explicit_per_call_timeout_is_not_floored(self):
         client = _client_async()
         explicit = 45.0
-        p1, p2, p3, p4 = _patches(client, task_timeout=COMPRESSION_CONFIG_TIMEOUT)
+        p1, p2, p3, p4 = _patches(client, task_timeout=COMPRESSION_BUILTIN_TIMEOUT)
         with p1, p2, p3, p4:
             await async_call_llm(
                 task="compression",

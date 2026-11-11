@@ -631,9 +631,10 @@ DEFAULT_CONFIG = {
         "hygiene_max_turn_hold_seconds": 10,
         # Inactivity budget for in-agent compress_context (loop, /compress, preflight); same
         # progress-aware semantics as hygiene_timeout_seconds. 0 = disable the owned wrapper
-        # (callers passing commit_fence, e.g. gateway hygiene, never use it). Floored at the auxiliary
-        # compression request timeout (auxiliary.compression.timeout, min 300s): the host never judges
-        # silence before the summary request itself would time out.
+        # (callers passing commit_fence, e.g. gateway hygiene, never use it). Raised to at least the
+        # effective auxiliary compression request timeout (built-in 900s; an explicit
+        # auxiliary.compression.timeout is kept): the host never judges silence before the summary
+        # request itself would time out.
         "context_timeout_seconds": 120,
         # Absolute cap on the *pre-commit* compress_context wait (summary/stream phase) even while
         # tokens move. Clamped >= context_timeout_seconds when that is > 0. A started SessionDB
@@ -744,10 +745,11 @@ DEFAULT_CONFIG = {
         # OpenAI-compatible request fields. Vision: download_timeout = image HTTP download (s).
         "vision": _aux(120, download_timeout=30),
         # web_extract, session_search, skills_hub: no aux LLM any more, leftover blocks are ignored.
-        # Compression: raise timeout for local models. no_progress_timeout: seconds a streamed call
-        # goes without a substantive chunk before it fails fast into retry/fallback; None = built-in
-        # 60s default. Independent of "timeout" (the overall request budget). See #108104.
-        "compression": _aux(120, no_progress_timeout=None),
+        # Compression built-in budget is 900s for both the request timeout and the no-progress
+        # window. Other auxiliary tasks keep their own timeouts and the shared 60s no-progress
+        # default. An explicit timeout / no_progress_timeout in config.yaml replaces these,
+        # including a shorter value. The no-progress window is still capped at timeout. See #108104.
+        "compression": _aux(900, no_progress_timeout=900),
         "approval": _aux(30),   # classifier — a fast/cheap model is recommended
         # /review reviewer: a full subagent on the async delegation rail, credentials resolved like
         # delegation.provider pins. "auto" + "" = main agent's model. api_mode forces transport:
