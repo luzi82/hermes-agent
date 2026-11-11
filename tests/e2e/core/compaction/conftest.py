@@ -40,8 +40,10 @@ def make_scenario(provider, tmp_path, monkeypatch):
         monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", hermes_home / "state.db")
         slow = mode == "slow"
         if slow:
-            # The compression request timeout has a 300 s production floor; pin it (and the host idle
-            # watchdog) to seconds so a hung summarizer is judged inside a unit-test budget.
+            # The home's auxiliary.compression.timeout is the request budget and is not raised to
+            # the 900s built-in. Keep the historical floor pinned too, so a regression that floors
+            # an explicit short timeout again still finishes inside a unit-test budget. The host
+            # idle watchdog is pinned to the same short value.
             import agent.auxiliary_client as aux
 
             monkeypatch.setattr(aux, "_COMPRESSION_TIMEOUT_FLOOR_SECONDS", SLOW_SUMMARY_TIMEOUT_SECONDS)

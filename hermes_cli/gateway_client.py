@@ -22,7 +22,7 @@ RESUME_KEY_MISMATCH = ("--api-key on resume must be the key this session was lau
                        "(a session launched without --api-key keeps its profile credentials). "
                        "A session never switches keys: start a new one (without --resume) to use a different key.")
 # Canonical ``/compress`` answers only after the summary call(s) and the commit: a long session's
-# summary routinely takes more than 30 s (``auxiliary.compression.timeout`` defaults to 120 s per
+# summary routinely takes more than 30 s (``auxiliary.compression.timeout`` defaults to 900 s per
 # request, ``compression.context_total_ceiling_seconds`` to 600 s). Same budget as Desktop's
 # ``SESSION_COMPRESS_TIMEOUT_MS`` so every surface gives up at the same point.
 COMPRESS_RPC_TIMEOUT = 660
